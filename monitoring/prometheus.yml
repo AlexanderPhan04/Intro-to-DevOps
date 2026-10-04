@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: intro-devops-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["app:9000"]
+    # If METRICS_TOKEN is set on the app, uncomment and use the same value:
+    # authorization:
+    #   type: Bearer
+    #   credentials: <METRICS_TOKEN>
