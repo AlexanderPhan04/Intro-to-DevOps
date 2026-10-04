@@ -10,8 +10,8 @@ Bài tập cá nhân **DevOps cho ứng dụng Web Node.js**: REST API quản l�
 | Họ tên | _<Họ và tên>_ |
 | Mã số học viên | _<MSHV>_ |
 | Lớp | _<Lớp>_ |
-| App (production) | _<http://103.12.77.228:9100>_ |
-| App (staging) | _<http://103.12.77.228:9101>_ |
+| App (production) | https://todo.alexanderphan.dev |
+| App (staging) | chạy nội bộ trên VPS (`127.0.0.1:9101`), không public |
 | Video demo | _<link YouTube>_ |
 
 ---
