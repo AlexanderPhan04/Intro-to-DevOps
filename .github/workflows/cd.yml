@@ -34,7 +34,7 @@ jobs:
       environment: ${{ steps.meta.outputs.environment }}
     steps:
       - name: Checkout tested commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
