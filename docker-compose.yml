@@ -3,44 +3,70 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        APP_VERSION: local
+    image: intro-devops-app:local
     container_name: intro-devops-app
     restart: unless-stopped
     ports:
-      - "9000:9000"
+      - "${APP_PORT:-9000}:9000"
     environment:
+      NODE_ENV: production
       PORT: 9000
-      DATABASE_URL: postgresql://postgres:postgres@db:5432/devops_db
+      LOG_LEVEL: ${LOG_LEVEL:-http}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-devops_db}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
     depends_on:
       db:
         condition: service_healthy
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://localhost:9000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
 
   db:
     image: postgres:17-alpine
     container_name: intro-devops-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: devops_db
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-devops_db}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d devops_db"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+
+  # Optional monitoring stack: docker compose --profile monitoring up --build
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: intro-devops-prometheus
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - app
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    container_name: intro-devops-grafana
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
 
 volumes:
   postgres_data:
+  grafana_data:
