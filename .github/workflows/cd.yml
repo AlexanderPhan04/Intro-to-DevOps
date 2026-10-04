@@ -1,18 +1,20 @@
 name: CD
 
-# Runs only after the CI workflow succeeded for a push (incl. PR merge) to main.
+# Runs only after the CI workflow succeeded for a push (incl. PR merge):
+#   develop -> staging
+#   main    -> production
 on:
   workflow_run:
     workflows: [CI]
     types: [completed]
-    branches: [main]
+    branches: [main, develop]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: cd-main
+  group: cd-${{ github.event.workflow_run.head_branch || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -29,18 +31,30 @@ jobs:
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       sha: ${{ steps.meta.outputs.sha }}
+      environment: ${{ steps.meta.outputs.environment }}
     steps:
       - name: Checkout tested commit
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      - name: Compute image name and tag
+      - name: Compute image name, tag and target environment
         id: meta
+        env:
+          BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
         run: |
-          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/intro-devops-api" >> "$GITHUB_OUTPUT"
-          echo "tag=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          case "$BRANCH" in
+            main)    environment=production; channel=latest ;;
+            develop) environment=staging;    channel=develop ;;
+            *) echo "Branch $BRANCH is not deployable"; exit 1 ;;
+          esac
+          {
+            echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/intro-devops-api"
+            echo "tag=sha-$(git rev-parse --short=7 HEAD)"
+            echo "sha=$(git rev-parse HEAD)"
+            echo "channel=${channel}"
+            echo "environment=${environment}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -60,7 +74,7 @@ jobs:
           build-args: APP_VERSION=${{ steps.meta.outputs.tag }}
           tags: |
             ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
-            ${{ steps.meta.outputs.image }}:latest
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.channel }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
@@ -70,11 +84,12 @@ jobs:
       - name: Summary
         run: |
           echo "### Image published" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}\` → **${{ steps.meta.outputs.environment }}**" >> "$GITHUB_STEP_SUMMARY"
 
   deploy-staging:
     name: Staging
     needs: build-and-push
+    if: needs.build-and-push.outputs.environment == 'staging'
     permissions:
       contents: read
       packages: read
@@ -87,7 +102,8 @@ jobs:
 
   deploy-production:
     name: Production
-    needs: [build-and-push, deploy-staging]
+    needs: build-and-push
+    if: needs.build-and-push.outputs.environment == 'production'
     permissions:
       contents: read
       packages: read
