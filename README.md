@@ -11,7 +11,7 @@ Bài tập cá nhân **DevOps cho ứng dụng Web Node.js**: REST API quản l�
 | Mã số học viên | _<MSHV>_ |
 | Lớp | _<Lớp>_ |
 | App (production) | https://todo.alexanderphan.dev |
-| App (staging) | chạy nội bộ trên VPS (`127.0.0.1:9101`), không public |
+| App (staging) | https://todo-staging.alexanderphan.dev |
 | Video demo | _<link YouTube>_ |
 
 ---
@@ -58,12 +58,35 @@ flowchart LR
         D[npm audit]
         C & D --> E[Docker build] --> F[Trivy scan] --> G[docker compose smoke test]
     end
-    CI -->|pass trên main| CD
-    subgraph CD["CD (chỉ main)"]
-        H[Build & push GHCR<br/>tag sha-xxxxxxx + latest] --> I[SSH → VPS: deploy staging<br/>+ verify /health]
-        I --> J[SSH → VPS: deploy production<br/>+ verify /health]
+    CI -->|pass trên develop / main| CD
+    subgraph CD["CD"]
+        H[Build & push GHCR<br/>tag sha-xxxxxxx] -->|develop| I[SSH → VPS: deploy staging<br/>+ verify /health]
+        H -->|main| J[SSH → VPS: deploy production<br/>+ verify /health]
     end
     I & J -->|health fail| R[Tự động rollback<br/>về version trước]
+```
+
+### Branching
+
+```mermaid
+gitGraph
+    commit id: "init"
+    branch develop
+    checkout develop
+    branch feature/x
+    checkout feature/x
+    commit id: "feat"
+    checkout develop
+    merge feature/x id: "→ staging"
+    checkout main
+    merge develop id: "→ production"
+```
+
+| Nhánh | Vai trò | Deploy tới |
+|---|---|---|
+| `feature/*` | Phát triển tính năng, mở PR vào `develop` | – (chỉ chạy CI) |
+| `develop` | Tích hợp, kiểm thử | **staging** – https://todo-staging.alexanderphan.dev |
+| `main` | Bản phát hành | **production** – https://todo.alexanderphan.dev |
 ```
 
 ---
@@ -185,7 +208,7 @@ npm run dev
 
 ## 5. CI pipeline (`.github/workflows/ci.yml`)
 
-Chạy khi **push lên mọi branch** và **pull request vào `main`**. Bất kỳ bước nào fail thì pipeline dừng.
+Chạy khi **push lên mọi branch** và **pull request vào `develop` hoặc `main`**. Bất kỳ bước nào fail thì pipeline dừng.
 
 1. **Lint & Test** (matrix Node 20 và 22): `npm ci` → `npm run lint` → `npm run test:ci`. Ngưỡng coverage tối thiểu 80%, dưới ngưỡng là fail.
 2. **Báo cáo test**: kết quả Jest hiển thị dạng check run "Jest results" (dorny/test-reporter), bảng coverage hiển thị trong Job Summary, thư mục coverage được upload làm artifact.
@@ -194,11 +217,11 @@ Chạy khi **push lên mọi branch** và **pull request vào `main`**. Bất k�
 
 ## 6. CD pipeline (`.github/workflows/cd.yml`)
 
-Chỉ chạy khi workflow **CI hoàn thành thành công** cho một lần **push/merge vào `main`** (trigger `workflow_run`), hoặc chạy tay qua `workflow_dispatch`.
+Chỉ chạy khi workflow **CI hoàn thành thành công** cho một lần **push/merge vào `develop` hoặc `main`** (trigger `workflow_run`), hoặc chạy tay qua `workflow_dispatch`.
 
-1. **Build & push** image lên **GitHub Container Registry** (`ghcr.io/<owner>/intro-devops-api`) với 2 tag: `sha-<7 ký tự commit>` (bất biến, dùng để rollback) và `latest`. Đăng nhập bằng `GITHUB_TOKEN` tự cấp, không cần thêm tài khoản.
-2. **Deploy staging** (`deploy-vps.yml`): SSH vào VPS, upload `deploy/docker-compose.prod.yml` + `scripts/remote-deploy.sh` vào `/opt/intro-devops/staging`, tạo file `.env` trên server từ GitHub Secrets, rồi chạy `remote-deploy.sh <tag>`.
-3. **Deploy production**: chỉ chạy khi staging thành công, thư mục `/opt/intro-devops/production`. Có thể bật **Required reviewers** để duyệt tay trước khi deploy.
+1. **Build & push** image lên **GitHub Container Registry** (`ghcr.io/<owner>/intro-devops-api`) với tag `sha-<7 ký tự commit>` (bất biến, dùng để rollback) và tag kênh: `develop` cho nhánh `develop`, `latest` cho `main`. Đăng nhập bằng `GITHUB_TOKEN` tự cấp, không cần thêm tài khoản.
+2. **`develop` → staging** (`deploy-vps.yml`): SSH vào VPS, upload `deploy/docker-compose.prod.yml` + `scripts/remote-deploy.sh` vào `/opt/intro-devops/staging`, tạo file `.env` trên server từ GitHub Secrets, rồi chạy `remote-deploy.sh <tag>`.
+3. **`main` → production**: tương tự, thư mục `/opt/intro-devops/production`. Có thể bật **Required reviewers** để duyệt tay trước khi deploy.
 4. **Kiểm tra sau deploy**: `docker compose up --wait` chờ container healthy (HEALTHCHECK gọi `/health`), sau đó runner gọi `APP_URL/health` từ Internet và so sánh `version` với tag vừa deploy.
 5. **Rollback tự động**: `remote-deploy.sh` lưu tag đang chạy (`.current_tag`, `.previous_tag`). Nếu bản mới không healthy, script tự chạy lại bản cũ và pipeline báo fail.
 
@@ -274,10 +297,12 @@ Với `production`, nên bật **Required reviewers** và giới hạn *Deployme
 ### Bước 4 – Chạy
 
 ```bash
+git checkout develop && git pull
 git checkout -b feature/x
 # ... sửa code ...
 git push origin feature/x     # CI chạy
-# Tạo Pull Request → CI chạy → Merge vào main → CI chạy lại → CD tự động deploy
+# PR feature/x → develop, merge  → CI → CD deploy staging
+# PR develop → main, merge       → CI → CD deploy production
 ```
 
 Kiểm tra trên server:
