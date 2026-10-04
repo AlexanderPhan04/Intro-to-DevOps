@@ -1,0 +1,33 @@
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [staging, production]
+        required: true
+      tag:
+        description: Image tag to roll back to (e.g. sha-1a2b3c4). Leave empty for the previous version.
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-main
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Rollback
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/deploy-vps.yml
+    with:
+      environment: ${{ inputs.environment }}
+      tag: ${{ inputs.tag || '--rollback' }}
+    secrets: inherit
