@@ -1,7 +1,16 @@
-const { Pool } = require('pg');
+const { Pool } = require("pg");
 
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-});
+function createPool({ databaseUrl, databaseSsl }) {
+  if (!databaseUrl) {
+    throw new Error("DATABASE_URL is not set");
+  }
 
-module.exports = pool;
+  return new Pool({
+    connectionString: databaseUrl,
+    ssl: databaseSsl ? { rejectUnauthorized: false } : false,
+    max: 10,
+    idleTimeoutMillis: 30000,
+  });
+}
+
+module.exports = { createPool };

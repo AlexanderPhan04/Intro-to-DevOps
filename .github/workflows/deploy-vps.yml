@@ -1,0 +1,135 @@
+name: Deploy to VPS
+
+# Reusable workflow: called by cd.yml and rollback.yml.
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub environment (staging | production)
+        type: string
+        required: true
+      tag:
+        description: Image tag to deploy, or "--rollback" for the previous tag
+        type: string
+        required: true
+      ref:
+        description: Git ref containing the deploy files
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ vars.APP_URL }}
+    env:
+      ENVIRONMENT: ${{ inputs.environment }}
+      TAG: ${{ inputs.tag }}
+      DEPLOY_DIR: /opt/intro-devops/${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Validate configuration
+        env:
+          VPS_HOST: ${{ vars.VPS_HOST || secrets.VPS_HOST }}
+          VPS_USER: ${{ vars.VPS_USER || secrets.VPS_USER }}
+          APP_PORT: ${{ vars.APP_PORT }}
+          HAS_KEY: ${{ secrets.VPS_SSH_KEY != '' }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        run: |
+          missing=()
+          [[ -n "$VPS_HOST" ]] || missing+=("VPS_HOST")
+          [[ -n "$VPS_USER" ]] || missing+=("VPS_USER")
+          [[ -n "$APP_PORT" ]] || missing+=("variable APP_PORT (environment ${ENVIRONMENT})")
+          [[ "$HAS_KEY" == "true" ]] || missing+=("secret VPS_SSH_KEY")
+          [[ -n "$POSTGRES_PASSWORD" ]] || missing+=("secret POSTGRES_PASSWORD (environment ${ENVIRONMENT})")
+          if (( ${#missing[@]} )); then
+            printf 'Missing configuration: %s\n' "${missing[@]}"; exit 1
+          fi
+          [[ "$POSTGRES_PASSWORD" =~ ^[A-Za-z0-9]{16,}$ ]] || {
+            echo "POSTGRES_PASSWORD must be at least 16 alphanumeric characters"; exit 1; }
+          [[ "$TAG" =~ ^(sha-[0-9a-f]{7}|--rollback)$ ]] || { echo "Invalid tag: $TAG"; exit 1; }
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          VPS_HOST: ${{ vars.VPS_HOST || secrets.VPS_HOST }}
+          VPS_USER: ${{ vars.VPS_USER || secrets.VPS_USER }}
+          VPS_PORT: ${{ vars.VPS_PORT || secrets.VPS_PORT || '22' }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          if [[ -n "$KNOWN_HOSTS" ]]; then
+            printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -p "$VPS_PORT" -H "$VPS_HOST" > ~/.ssh/known_hosts
+          fi
+          printf 'Host vps\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_deploy\n  IdentitiesOnly yes\n  ServerAliveInterval 30\n' \
+            "$VPS_HOST" "$VPS_USER" "$VPS_PORT" > ~/.ssh/config
+
+      - name: Upload deploy files
+        run: |
+          ssh vps "mkdir -p '$DEPLOY_DIR'"
+          scp deploy/docker-compose.prod.yml scripts/remote-deploy.sh "vps:$DEPLOY_DIR/"
+
+      - name: Write server .env from GitHub Secrets
+        env:
+          APP_PORT: ${{ vars.APP_PORT }}
+          APP_BIND: ${{ vars.APP_BIND || '0.0.0.0' }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          METRICS_TOKEN: ${{ secrets.METRICS_TOKEN }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/intro-devops-api"
+          {
+            echo "COMPOSE_PROJECT_NAME=intro-devops-${ENVIRONMENT}"
+            echo "IMAGE=${image}"
+            echo "APP_PORT=${APP_PORT}"
+            echo "APP_BIND=${APP_BIND}"
+            echo "POSTGRES_USER=app"
+            echo "POSTGRES_DB=todos"
+            echo "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}"
+            echo "METRICS_TOKEN=${METRICS_TOKEN}"
+          } | ssh vps "umask 077 && cat > '$DEPLOY_DIR/.env'"
+
+      - name: Log in to GHCR on the server (isolated config)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GH_TOKEN" | ssh vps \
+            "DOCKER_CONFIG='$DEPLOY_DIR/.docker' docker login ghcr.io -u '${{ github.actor }}' --password-stdin"
+
+      - name: Deploy (auto-rollback on failure)
+        run: ssh vps "bash '$DEPLOY_DIR/remote-deploy.sh' '$TAG'"
+
+      - name: Remove registry credentials from the server
+        if: always()
+        run: ssh vps "DOCKER_CONFIG='$DEPLOY_DIR/.docker' docker logout ghcr.io" || true
+
+      - name: Verify public URL
+        if: vars.APP_URL != ''
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          for i in $(seq 1 10); do
+            if body=$(curl -fsS --max-time 10 "$APP_URL/health"); then
+              echo "$body" | jq .
+              version=$(jq -r .version <<<"$body")
+              if [[ "$TAG" == "--rollback" || "$version" == "$TAG" ]]; then
+                echo "Live version: $version"; exit 0
+              fi
+            fi
+            echo "Attempt $i: not ready yet"; sleep 6
+          done
+          echo "Public health check failed for $APP_URL"; exit 1
+
